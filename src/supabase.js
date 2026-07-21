@@ -139,7 +139,10 @@ export async function getToken() {
 // ── 讀取/更新個人檔案 ──
 export async function getProfile() {
   if (!supabase) return null;
-  const { data, error } = await supabase.from("profiles").select("*").maybeSingle();
+  const { data: u } = await supabase.auth.getUser();
+  if (!u?.user) return null;
+  const { data, error } = await supabase.from("profiles")
+    .select("*").eq("id", u.user.id).maybeSingle();
   if (error) throw error;
   return data;
 }
@@ -164,7 +167,10 @@ export async function ensureAccount() {
 
 export async function getAccount() {
   if (!supabase) return null;
-  const { data, error } = await supabase.from("accounts").select("*").maybeSingle();
+  const { data: u } = await supabase.auth.getUser();
+  if (!u?.user) return null;
+  const { data, error } = await supabase.from("accounts")
+    .select("*").eq("id", u.user.id).maybeSingle();
   if (error) throw error;
   return data;
 }
@@ -253,8 +259,11 @@ export async function saveChartCloud(kind, title, data, aiText) {
 }
 export async function listChartsCloud(kind) {
   if (!supabase) return [];
+  const { data: u } = await supabase.auth.getUser();
+  if (!u?.user) return [];
   const { data, error } = await supabase.from(chartTable(kind))
-    .select("*").order("created_at", { ascending: false }).limit(50);
+    .select("*").eq("user_id", u.user.id)
+    .order("created_at", { ascending: false }).limit(50);
   if (error) throw error;
   return (data || []).map(chartRowToSavedItem);
 }
