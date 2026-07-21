@@ -300,7 +300,7 @@ export function PasswordRecovery({ onDone }) {
   );
 }
 
-export function AccountPanel({ user, profile, onClose, onProfileSaved, onLoggedOut }) {
+export function AccountPanel({ user, profile, account, onClose, onProfileSaved, onLoggedOut }) {
   const [name, setName] = useState(profile?.display_name || "");
   const [birthYear, setBirthYear] = useState(profile?.birth_year || "");
   const [birthMonth, setBirthMonth] = useState(profile?.birth_month || "");
@@ -314,6 +314,9 @@ export function AccountPanel({ user, profile, onClose, onProfileSaved, onLoggedO
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const isGuest = Boolean(user?.is_anonymous);
+  const accountType = account?.account_type || "guest";
+  const accountLabel = accountType === "admin" ? "Admin 管理員" : accountType === "vip" ? "VIP 會員" : "Guest 會員";
+  const accountColor = accountType === "admin" ? "#c23b22" : accountType === "vip" ? "#a47700" : colors.muted;
 
   const save = async () => {
     if (!birthYear || !birthMonth || !birthDay) {
@@ -381,6 +384,7 @@ export function AccountPanel({ user, profile, onClose, onProfileSaved, onLoggedO
           <div>
             <h1 style={{ margin: 0, fontSize: 21, color: colors.gold }}>我的帳戶</h1>
             <div style={{ marginTop: 4, fontSize: 12, color: colors.muted }}>{isGuest ? "訪客帳戶" : user?.email}</div>
+            <div style={{ marginTop: 5, fontSize: 12, fontWeight: 700, color: accountColor }}>帳戶等級：{accountLabel}</div>
           </div>
           <button type="button" onClick={onClose} style={secondaryButton}>返回</button>
         </div>
@@ -391,7 +395,8 @@ export function AccountPanel({ user, profile, onClose, onProfileSaved, onLoggedO
           </div>
         )}
 
-        <div style={{ fontSize: 14, fontWeight: 700, color: colors.gold, marginBottom: 8 }}>個人資料</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: colors.gold, marginBottom: 2 }}>首次建立的個人資料</div>
+        <div style={{ fontSize: 11, color: colors.muted, marginBottom: 8 }}>登入後會自動找回；八字頁亦可按「載入我的資料」。</div>
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="稱呼" style={inputStyle} />
         <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr", gap: 8, marginTop: 8 }}>
           <input type="number" value={birthYear} onChange={(e) => setBirthYear(e.target.value)} placeholder="出生年" style={inputStyle} />

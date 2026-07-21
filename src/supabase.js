@@ -154,27 +154,113 @@ export async function saveProfile(fields) {
   if (error) throw error;
 }
 
+// ── 帳戶身份（guest / vip / admin）──
+export async function ensureAccount() {
+  if (!supabase) return null;
+  const { data, error } = await supabase.rpc("ensure_my_account");
+  if (error) throw error;
+  return data;
+}
+
+export async function getAccount() {
+  if (!supabase) return null;
+  const { data, error } = await supabase.from("accounts").select("*").maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
 // ── 命盤儲存（雲端）──
+const CHART_TABLES = {
+  bazi: "bazi_charts",
+  liuren: "liuren_charts",
+  qimen: "qimen_charts",
+};
+
+function chartTable(kind) {
+  const table = CHART_TABLES[kind];
+  if (!table) throw new Error("不支援的存盤類型");
+  return table;
+}
+
+function numberOrNull(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function buildChartRow(kind, userId, title, data, aiText) {
+  const base = {
+    user_id: userId,
+    title,
+    data,
+    ai_text: aiText || null,
+  };
+
+  if (kind === "bazi") {
+    const pillars = String(data.gz || "").split(/\s+/);
+    return {
+      ...base,
+      name: data.name || title || null,
+      birth_year: numberOrNull(data.birthY ?? data.date?.split("-")[0]),
+      birth_month: numberOrNull(data.birthM ?? data.date?.split("-")[1]),
+      birth_day: numberOrNull(data.birthD ?? data.date?.split("-")[2]),
+      birth_hour: numberOrNull(data.birthH ?? data.time?.split(":")[0]),
+      birth_minute: numberOrNull(data.birthMi ?? data.time?.split(":")[1]),
+      gender: ["男", "女"].includes(data.gender) ? data.gender : null,
+      longitude: numberOrNull(data.lng),
+      year_pillar: pillars[0] || null,
+      month_pillar: pillars[1] || null,
+      day_pillar: pillars[2] || null,
+      hour_pillar: pillars[3] || null,
+    };
+  }
+
+  if (kind === "liuren") {
+    return {
+      ...base,
+      question: data.question || null,
+      cast_at: data.dateISO || new Date().toISOString(),
+      day_ganzhi: data.dayGz || null,
+      hour_ganzhi: data.shiGz || null,
+      san_chuan: data.sanChuan || null,
+      method: data.method || null,
+    };
+  }
+
+  const juMatch = String(data.juDesc || "").match(/\d+/);
+  return {
+    ...base,
+    question: data.question || null,
+    cast_at: data.dateISO || new Date().toISOString(),
+    true_solar: data.trueSolar !== false,
+    longitude: numberOrNull(data.lng),
+    dun: String(data.juDesc || "").slice(0, 1) || null,
+    ju: juMatch ? Number(juMatch[0]) : null,
+    yuan: data.yuan || null,
+    solar_term: data.jq || null,
+    day_ganzhi: data.dayGz || null,
+    hour_ganzhi: data.shiGz || null,
+  };
+}
+
 export async function saveChartCloud(kind, title, data, aiText) {
   const { data: u } = await supabase.auth.getUser();
   if (!u?.user) throw new Error("未登入");
-  const { data: row, error } = await supabase.from("charts")
-    .insert({ user_id: u.user.id, kind, title, data, ai_text: aiText || null })
+  const { data: row, error } = await supabase.from(chartTable(kind))
+    .insert(buildChartRow(kind, u.user.id, title, data, aiText))
     .select().single();
   if (error) throw error;
   return chartRowToSavedItem(row);
 }
 export async function listChartsCloud(kind) {
   if (!supabase) return [];
-  let q = supabase.from("charts").select("*").order("created_at", { ascending: false }).limit(50);
-  if (kind) q = q.eq("kind", kind);
-  const { data, error } = await q;
+  const { data, error } = await supabase.from(chartTable(kind))
+    .select("*").order("created_at", { ascending: false }).limit(50);
   if (error) throw error;
   return (data || []).map(chartRowToSavedItem);
 }
-export async function deleteChartCloud(id) {
+export async function deleteChartCloud(kind, id) {
   if (!supabase) throw new Error("Supabase 未設定");
-  const { error } = await supabase.from("charts").delete().eq("id", id);
+  const { error } = await supabase.from(chartTable(kind)).delete().eq("id", id);
   if (error) throw error;
 }
 
