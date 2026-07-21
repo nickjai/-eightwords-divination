@@ -59,8 +59,18 @@ async function devXhrFetch(input, init = {}) {
 // 用嚟喺 App.jsx 判斷 .env 有冇填齊
 export const isSupabaseConfigured = Boolean(configuredUrl && anonKey);
 
+const clientOptions = {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    storageKey: "eightwords-auth",
+  },
+  ...(import.meta.env.DEV ? { global: { fetch: devXhrFetch } } : {}),
+};
+
 export const supabase = isSupabaseConfigured
-  ? createClient(url, anonKey, import.meta.env.DEV ? { global: { fetch: devXhrFetch } } : undefined)
+  ? createClient(url, anonKey, clientOptions)
   : null;
 
 // ── 匿名/訪客登入（帶 hCaptcha token）──
@@ -73,6 +83,52 @@ export async function signInGuest(captchaToken) {
   return data.user;
 }
 
+export async function signUpWithEmail(email, password, captchaToken) {
+  if (!supabase) throw new Error("Supabase 未設定");
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+    options: {
+      captchaToken,
+      emailRedirectTo: window.location.origin,
+    },
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function signInWithEmail(email, password, captchaToken) {
+  if (!supabase) throw new Error("Supabase 未設定");
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+    options: { captchaToken },
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function sendPasswordReset(email, captchaToken) {
+  if (!supabase) throw new Error("Supabase 未設定");
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: window.location.origin,
+    captchaToken,
+  });
+  if (error) throw error;
+}
+
+export async function updatePassword(password) {
+  if (!supabase) throw new Error("Supabase 未設定");
+  const { error } = await supabase.auth.updateUser({ password });
+  if (error) throw error;
+}
+
+export async function signOut() {
+  if (!supabase) return;
+  const { error } = await supabase.auth.signOut();
+  if (error) throw error;
+}
+
 // ── 取得目前 session token（畀後端代理用）──
 export async function getToken() {
   if (!supabase) return null;
@@ -82,7 +138,9 @@ export async function getToken() {
 
 // ── 讀取/更新個人檔案 ──
 export async function getProfile() {
-  const { data } = await supabase.from("profiles").select("*").single();
+  if (!supabase) return null;
+  const { data, error } = await supabase.from("profiles").select("*").maybeSingle();
+  if (error) throw error;
   return data;
 }
 export async function saveProfile(fields) {
@@ -104,16 +162,30 @@ export async function saveChartCloud(kind, title, data, aiText) {
     .insert({ user_id: u.user.id, kind, title, data, ai_text: aiText || null })
     .select().single();
   if (error) throw error;
-  return row;
+  return chartRowToSavedItem(row);
 }
 export async function listChartsCloud(kind) {
-  let q = supabase.from("charts").select("*").order("created_at", { ascending: false });
+  if (!supabase) return [];
+  let q = supabase.from("charts").select("*").order("created_at", { ascending: false }).limit(50);
   if (kind) q = q.eq("kind", kind);
-  const { data } = await q;
-  return data || [];
+  const { data, error } = await q;
+  if (error) throw error;
+  return (data || []).map(chartRowToSavedItem);
 }
 export async function deleteChartCloud(id) {
-  await supabase.from("charts").delete().eq("id", id);
+  if (!supabase) throw new Error("Supabase 未設定");
+  const { error } = await supabase.from("charts").delete().eq("id", id);
+  if (error) throw error;
+}
+
+function chartRowToSavedItem(row) {
+  const stored = row?.data && typeof row.data === "object" ? row.data : {};
+  return {
+    ...stored,
+    id: row.id,
+    aiText: row.ai_text ?? stored.aiText ?? "",
+    created: stored.created || new Date(row.created_at).toLocaleDateString("zh-TW"),
+  };
 }
 
 // ── 我的用量 ──
