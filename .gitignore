@@ -3,6 +3,12 @@ dist
 .env
 .env.local
 .vercel
+.uat-*-profile/
+uat-*.png
 
 *.before-*
 *.codex-backup
+.codex-uat-dev.mjs
+START_UAT_V1_2.bat
+.vite-uat-v12
+dist-uat
