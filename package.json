@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:v1.1": "node --test tests/v1.1.test.mjs",
+    "test:v1.2": "node --test tests/v1.1.test.mjs tests/v1.2.test.mjs"
   },
   "dependencies": {
     "@hcaptcha/react-hcaptcha": "^2.0.2",
