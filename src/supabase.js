@@ -1,4 +1,4 @@
-﻿import { createClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
 
 const configuredUrl = import.meta.env.VITE_SUPABASE_URL;
 const url = import.meta.env.DEV
@@ -141,7 +141,6 @@ export async function getProfile() {
   if (!supabase) return null;
   const { data: u } = await supabase.auth.getUser();
   if (!u?.user) return null;
-  // 新匿名用戶可能未有 profile row，用 maybeSingle 避免 0 rows 報錯
   const { data, error } = await supabase.from("profiles")
     .select("*").eq("id", u.user.id).maybeSingle();
   if (error) throw error;
@@ -190,6 +189,7 @@ function chartTable(kind) {
 }
 
 function numberOrNull(value) {
+  if (value == null || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -200,6 +200,7 @@ function buildChartRow(kind, userId, title, data, aiText) {
     title,
     data,
     ai_text: aiText || null,
+    updated_at: new Date().toISOString(),
   };
 
   if (kind === "bazi") {
@@ -258,6 +259,16 @@ export async function saveChartCloud(kind, title, data, aiText) {
   if (error) throw error;
   return chartRowToSavedItem(row);
 }
+export async function updateChartCloud(kind, id, title, data, aiText) {
+  const { data: u } = await supabase.auth.getUser();
+  if (!u?.user) throw new Error("未登入");
+  const { data: row, error } = await supabase.from(chartTable(kind))
+    .update(buildChartRow(kind, u.user.id, title, data, aiText))
+    .eq("id", id).eq("user_id", u.user.id)
+    .select().single();
+  if (error) throw error;
+  return chartRowToSavedItem(row);
+}
 export async function listChartsCloud(kind) {
   if (!supabase) return [];
   const { data: u } = await supabase.auth.getUser();
@@ -289,13 +300,12 @@ export async function myUsage() {
   const { data } = await supabase.from("usage_daily").select("*").order("day", { ascending: false }).limit(30);
   return data || [];
 }
-
-
-
-
-
-
-
-
-
-
+export async function getAiUsageCount(kind) {
+  const { data: u } = await supabase.auth.getUser();
+  if (!u?.user) return 0;
+  const { count, error } = await supabase.from("ai_logs")
+    .select("id", { count:"exact", head:true })
+    .eq("user_id", u.user.id).eq("kind", kind);
+  if (error) throw error;
+  return count || 0;
+}
