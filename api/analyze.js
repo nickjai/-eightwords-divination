@@ -8,15 +8,22 @@ const CHANNELS = {
   paid: { url:"https://api.moonshot.cn/v1/chat/completions", keyEnv:"KIMI_API_KEY", model:"kimi-k2-0905-preview", label:"Kimi K2.6" }
 };
 
-// 速率限制
-const bucket = new Map();
-function limited(id, ch) {
-  const now = Date.now(), limit = ch==="paid"?12:4, win=60000;
-  const r = bucket.get(id) || { c:0, t:now+win };
-  if (now > r.t) { r.c=0; r.t=now+win; }
-  r.c++; bucket.set(id, r);
-  if (bucket.size>5000) for (const [k,v] of bucket) if (now>v.t) bucket.delete(k);
-  return r.c > limit;
+// 速率限制（serverless 安全：用 DB 近 60 秒 count，唔靠 in-memory）
+async function limited(sb, id, ch) {
+  const limit = ch==="paid"?12:4, win=60000;
+  const since = new Date(Date.now()-win).toISOString();
+  const { count, error } = await sb
+    .from("ai_logs")
+    .select("*", { count:"exact", head:true })
+    .eq("user_id", id)
+    .gte("created_at", since);
+  if (error) return false; // 查詢失敗就放行（fail-open），唔阻正常用戶
+  return (count || 0) >= limit;
+}
+
+// 香港日期（YYYY-MM-DD），避免 UTC 令半夜用量算錯日
+function hkDay(d = new Date()) {
+  return new Date(d.getTime() + 8*3600*1000).toISOString().slice(0,10);
 }
 
 function svc() {
@@ -26,7 +33,10 @@ function svc() {
 }
 
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin","*");
+  // 預設保持相容（*）；喺 Vercel 設 ALLOWED_ORIGIN（例如 https://你的網域）即自動收緊
+  const allowOrigin = process.env.ALLOWED_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+  if (allowOrigin !== "*") res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods","POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers","Content-Type, Authorization");
   if (req.method==="OPTIONS") return res.status(200).end();
@@ -63,13 +73,13 @@ export default async function handler(req, res) {
     const apiKey = process.env[cfg.keyEnv];
     if (!apiKey) return res.status(500).json({error:`伺服器未設定 ${cfg.keyEnv}`});
 
-    if (limited(userId, useChannel)) return res.status(429).json({error:"請求太頻密，請稍候"});
+    if (await limited(sb, userId, useChannel)) return res.status(429).json({error:"請求太頻密，請稍候"});
 
     // ── 呼叫上游 ──
     const up = await fetch(cfg.url, {
       method:"POST",
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${apiKey}` },
-      body: JSON.stringify({ model:cfg.model, max_tokens:4096, temperature:0.7, messages:[{role:"user",content:prompt}] })
+      body: JSON.stringify({ model:cfg.model, max_tokens:8000, temperature:0.7, messages:[{role:"user",content:prompt}] })
     });
     if (!up.ok) {
       const t = await up.text();
@@ -79,19 +89,21 @@ export default async function handler(req, res) {
     const text = data?.choices?.[0]?.message?.content || "";
 
     // ── 記錄用量（service key 寫入，繞過 RLS）──
-    const today = new Date().toISOString().slice(0,10);
+    const today = hkDay();
     await sb.from("ai_logs").insert({
       user_id:userId, kind, channel:useChannel, model:cfg.model,
       prompt_chars:prompt.length, result_chars:text.length
     });
     // upsert 每日統計
     const col = useChannel==="paid" ? "paid_count" : "free_count";
-    await sb.rpc("increment_usage", { p_user:userId, p_day:today, p_col:col }).then(()=>{}).catch(async()=>{
-      // 若冇 rpc，退回手動 upsert
-      const { data:ex } = await sb.from("usage_daily").select("*").eq("user_id",userId).eq("day",today).single();
+    // Supabase 唔會 reject，要睇回傳 error 先判斷 RPC 係咪失敗
+    const { error:rpcErr } = await sb.rpc("increment_usage", { p_user:userId, p_day:today, p_col:col });
+    if (rpcErr) {
+      // 若冇 rpc（或執行失敗），退回手動 upsert
+      const { data:ex } = await sb.from("usage_daily").select("*").eq("user_id",userId).eq("day",today).maybeSingle();
       if (ex) await sb.from("usage_daily").update({ [col]: (ex[col]||0)+1 }).eq("user_id",userId).eq("day",today);
       else await sb.from("usage_daily").insert({ user_id:userId, day:today, [col]:1 });
-    });
+    }
 
     return res.status(200).json({ text, model:cfg.label, tier });
   } catch(e) {

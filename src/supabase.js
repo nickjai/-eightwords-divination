@@ -82,7 +82,8 @@ export async function getToken() {
 
 // ── 讀取/更新個人檔案 ──
 export async function getProfile() {
-  const { data } = await supabase.from("profiles").select("*").single();
+  // 新匿名用戶可能未有 profile row，用 maybeSingle 避免 0 rows 報錯
+  const { data } = await supabase.from("profiles").select("*").maybeSingle();
   return data;
 }
 export async function saveProfile(fields) {
