@@ -3,10 +3,58 @@
 
 import { createClient } from "@supabase/supabase-js";
 
-const CHANNELS = {
+export const CHANNELS = {
   free: { url:"https://api.deepseek.com/chat/completions", keyEnv:"DEEPSEEK_API_KEY", model:"deepseek-chat", label:"DeepSeek V3.2" },
-  paid: { url:"https://api.moonshot.cn/v1/chat/completions", keyEnv:"KIMI_API_KEY", model:"kimi-k2-0905-preview", label:"Kimi K2.6" }
+  paid: {
+    url:"https://api.moonshot.cn/v1/chat/completions",
+    keyEnvs:["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+    model:process.env.KIMI_MODEL || "kimi-k2.6",
+    label:"Kimi K2.6"
+  }
 };
+
+export const BAZI_AI_LIMIT = 20;
+
+export function channelConfig(channel) {
+  return CHANNELS[channel] || CHANNELS.free;
+}
+
+export function buildUpstreamRequest(config, channel, prompt) {
+  const requestBody = {
+    model:config.model,
+    max_tokens:4096,
+    temperature:0.7,
+    messages:[{role:"user",content:prompt}]
+  };
+  if (channel === "paid") requestBody.thinking = { type:"disabled" };
+  return requestBody;
+}
+
+function apiKeyFor(config) {
+  const names = config.keyEnvs || [config.keyEnv];
+  return names.map(name => process.env[name]).find(Boolean);
+}
+
+export async function accountTier(sb, userId) {
+  const { data:account } = await sb.from("accounts")
+    .select("account_type").eq("id", userId).maybeSingle();
+  if (["guest", "vip", "admin"].includes(account?.account_type)) {
+    return account.account_type;
+  }
+
+  // 舊資料庫未完成 accounts 遷移時的相容後備。
+  const { data:profile } = await sb.from("profiles")
+    .select("tier").eq("id", userId).maybeSingle();
+  return ["guest", "vip", "admin"].includes(profile?.tier) ? profile.tier : "guest";
+}
+
+export async function baziAnalysisUsage(sb, userId) {
+  const { count, error } = await sb.from("ai_logs")
+    .select("id", { count:"exact", head:true })
+    .eq("user_id", userId).eq("kind", "bazi");
+  if (error) throw error;
+  return count || 0;
+}
 
 // 速率限制
 const bucket = new Map();
@@ -47,43 +95,63 @@ export default async function handler(req, res) {
     if (uErr || !userData?.user) return res.status(401).json({error:"登入無效，請重新登入"});
     const userId = userData.user.id;
 
-    // ── 查用戶等級 ──
-    const { data:profile } = await sb.from("profiles").select("tier").eq("id", userId).single();
-    const tier = profile?.tier || "guest";
+    // ── 查用戶等級（正式來源為 accounts.account_type）──
+    const tier = await accountTier(sb, userId);
+
+    let baziUsed = null;
+    if (kind === "bazi") {
+      baziUsed = await baziAnalysisUsage(sb, userId);
+      if (baziUsed >= BAZI_AI_LIMIT) {
+        return res.status(429).json({error:`八字 AI 分析已達每個帳戶 ${BAZI_AI_LIMIT} 次上限`});
+      }
+    }
 
     // ── 通道權限控制（伺服器強制）──
     let useChannel = channel;
-    if (channel==="paid" && tier==="guest") {
+    if (channel==="paid" && !["vip", "admin"].includes(tier)) {
       // 訪客唔可以用付費通道 → 拒絕（唔靜靜降級，畀前端知道）
       return res.status(403).json({error:"付費通道僅限 VIP，訪客請用平價通道"});
     }
     if (tier==="guest") useChannel = "free"; // 訪客一律 free
 
-    const cfg = CHANNELS[useChannel] || CHANNELS.free;
-    const apiKey = process.env[cfg.keyEnv];
-    if (!apiKey) return res.status(500).json({error:`伺服器未設定 ${cfg.keyEnv}`});
+    const cfg = channelConfig(useChannel);
+    const apiKey = apiKeyFor(cfg);
+    const keyLabel = (cfg.keyEnvs || [cfg.keyEnv]).join(" 或 ");
+    if (!apiKey) return res.status(500).json({error:`伺服器未設定 ${keyLabel}`});
 
     if (limited(userId, useChannel)) return res.status(429).json({error:"請求太頻密，請稍候"});
 
     // ── 呼叫上游 ──
+    const requestBody = buildUpstreamRequest(cfg, useChannel, prompt);
+
     const up = await fetch(cfg.url, {
       method:"POST",
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${apiKey}` },
-      body: JSON.stringify({ model:cfg.model, max_tokens:4096, temperature:0.7, messages:[{role:"user",content:prompt}] })
+      body: JSON.stringify(requestBody)
     });
     if (!up.ok) {
       const t = await up.text();
-      return res.status(502).json({error:`${cfg.label} 服務異常`, detail:t.slice(0,300)});
+      let upstreamMessage = "";
+      try {
+        const parsed = JSON.parse(t);
+        upstreamMessage = parsed?.error?.message || parsed?.message || "";
+      } catch {}
+      console.error(`[${cfg.label}] upstream ${up.status}:`, t.slice(0,300));
+      return res.status(502).json({
+        error:`${cfg.label} 服務異常${upstreamMessage ? `：${upstreamMessage.slice(0,120)}` : ""}`,
+        detail:t.slice(0,300)
+      });
     }
     const data = await up.json();
     const text = data?.choices?.[0]?.message?.content || "";
 
     // ── 記錄用量（service key 寫入，繞過 RLS）──
     const today = new Date().toISOString().slice(0,10);
-    await sb.from("ai_logs").insert({
+    const { error:logError } = await sb.from("ai_logs").insert({
       user_id:userId, kind, channel:useChannel, model:cfg.model,
       prompt_chars:prompt.length, result_chars:text.length
     });
+    if (logError) throw logError;
     // upsert 每日統計
     const col = useChannel==="paid" ? "paid_count" : "free_count";
     await sb.rpc("increment_usage", { p_user:userId, p_day:today, p_col:col }).then(()=>{}).catch(async()=>{
@@ -93,7 +161,12 @@ export default async function handler(req, res) {
       else await sb.from("usage_daily").insert({ user_id:userId, day:today, [col]:1 });
     });
 
-    return res.status(200).json({ text, model:cfg.label, tier });
+    return res.status(200).json({
+      text,
+      model:cfg.label,
+      tier,
+      usage:kind === "bazi" ? { used:(baziUsed || 0) + 1, limit:BAZI_AI_LIMIT } : undefined
+    });
   } catch(e) {
     return res.status(500).json({error:"代理錯誤", detail:String(e).slice(0,300)});
   }
